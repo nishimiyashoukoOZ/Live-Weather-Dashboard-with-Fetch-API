@@ -1,0 +1,92 @@
+import unittest
+from unittest.mock import patch
+
+import app
+
+
+class WeatherAppTests(unittest.TestCase):
+    def setUp(self):
+        app.app.config.update(TESTING=True)
+        self.client = app.app.test_client()
+
+    def test_homepage_is_served(self):
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Skyline", response.data)
+
+    def test_search_requires_a_city(self):
+        response = self.client.get("/api/weather?city=%20%20")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Enter a city name", response.get_json()["error"])
+
+    def test_search_rejects_overlong_city(self):
+        response = self.client.get(f"/api/weather?city={'a' * 101}")
+        self.assertEqual(response.status_code, 400)
+
+    @patch("app.fetch_json", return_value={"results": []})
+    def test_unknown_city_returns_not_found(self, fetch_json):
+        response = self.client.get("/api/weather?city=Nowhere")
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("couldn't find", response.get_json()["error"])
+        fetch_json.assert_called_once()
+
+    @patch("app.fetch_json")
+    def test_weather_response_contains_current_conditions_and_five_days(self, fetch_json):
+        fetch_json.side_effect = [
+            {
+                "results": [
+                    {
+                        "name": "Paris",
+                        "admin1": "Ile-de-France",
+                        "country": "France",
+                        "latitude": 48.85,
+                        "longitude": 2.35,
+                    }
+                ]
+            },
+            {
+                "timezone": "Europe/Paris",
+                "current": {
+                    "temperature_2m": 18.2,
+                    "relative_humidity_2m": 62,
+                    "apparent_temperature": 18.0,
+                    "is_day": 1,
+                    "weather_code": 2,
+                    "wind_speed_10m": 8.1,
+                },
+                "daily": {
+                    "time": [
+                        "2026-10-13",
+                        "2026-10-14",
+                        "2026-10-15",
+                        "2026-10-16",
+                        "2026-10-17",
+                    ],
+                    "weather_code": [2, 0, 3, 61, 1],
+                    "temperature_2m_max": [20, 21, 18, 16, 19],
+                    "temperature_2m_min": [12, 13, 11, 10, 12],
+                    "sunrise": ["07:55"] * 5,
+                    "sunset": ["18:50"] * 5,
+                },
+            },
+        ]
+
+        response = self.client.get("/api/weather?city=Paris")
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["location"]["name"], "Paris")
+        self.assertEqual(data["current"]["temperature_2m"], 18.2)
+        self.assertEqual(len(data["forecast"]), 5)
+        self.assertEqual(data["forecast"][0]["temperature_max"], 20)
+        self.assertEqual(fetch_json.call_count, 2)
+
+    @patch("app.fetch_json", side_effect=app.WeatherServiceError("Weather service is down."))
+    def test_upstream_failure_returns_actionable_error(self, fetch_json):
+        response = self.client.get("/api/weather?city=Paris")
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("Weather service is down", response.get_json()["error"])
+
+
+if __name__ == "__main__":
+    unittest.main()
